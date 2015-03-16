@@ -10,8 +10,6 @@ import Control.Monad.Trans.Maybe
 import Control.Monad.Trans.State
 import System.Random
 import Data.Array.IO
-import Data.Map (Map, lookup, adjust)
-import qualified Data.Map as Map (fromList)
 
 data Suit = Spades | Clubs | Hearts | Diamonds deriving (Show, Eq)
 data Rank = Ace | King | Queen | Jack | Rank Int deriving Eq
@@ -28,15 +26,11 @@ instance Show Rank where
 
 data Action = Hit | Stand | Double | Split | Surrender deriving (Show, Eq)
 
-data PlayerType = Dealer | Player deriving (Show, Eq, Ord)
-
 data RoundOutcome = Win | Loss | Push deriving (Show, Eq)
 
 data Game = Game { cards :: [Card],
-                   hands :: Map PlayerType Hand,
                    totalScore :: Int,
-                   doubledDown :: Bool
-                 } deriving Show
+                   doubledDown :: Bool } deriving Show
 
 type GameS a = StateT Game a
 
@@ -62,10 +56,11 @@ newtype Card = Card (Rank, Suit) deriving (Eq)
 instance Show Card where
   show (Card (r, s)) = show r ++ " of " ++ show s
 
-newtype Hand = Hand { fromHand :: [Card] }
+type Hand = [Card]
+type Box = (Hand, Int)
 
-instance Show Hand where
-  show = joinWith ", " " and " . map show . fromHand
+showHand :: Hand -> String
+showHand = joinWith ", " " and " . map show 
 
 findOutcome :: Hand -> Hand -> RoundOutcome
 findOutcome d p
@@ -84,10 +79,10 @@ value (Card (Ace, _)) = [1, 11]
 value (Card (_, _)) = [10]
 
 possiblePoints :: Hand -> [Int]
-possiblePoints hand = filter (<=21) . (0:) . nub $ map sum $ mapM value (fromHand hand)
+possiblePoints hand = filter (<=21) . (0:) . nub $ map sum $ mapM value hand
  
 maximumPoints :: Hand -> Int
-maximumPoints hand = if maxP == 21 && length (fromHand hand) == 2 then 22 else maxP
+maximumPoints hand = if maxP == 21 && length hand == 2 then 22 else maxP
   where maxP = (maximum . possiblePoints) hand
 
 presentOptions :: [(a, String)] -> IO a
@@ -102,38 +97,33 @@ readNumber p err = do v <- MaybeT (fmap readMaybe getLine)
 readNumberUntilValid :: (Int -> Bool) -> String -> IO Int
 readNumberUntilValid p err = (fmap fromJust . runMaybeT . msum) (readNumber p err : repeat ((liftIO . putStrLn) err >> readNumber p err))
 
-resetRound :: GameS IO ()
-resetRound = do state <- get
-                put state { hands = Map.fromList [(Dealer, Hand []), (Player, Hand [])],
-                            doubledDown = False }
-
 gameLoop :: GameS IO ()
-gameLoop = do resetRound
-              bet <- inputBet
-              drawToPlayerType Player
-              drawToPlayerType Dealer
-              drawToPlayerType Player
-              resolveForPlayerType Player
-              resolveForPlayerType Dealer
-              adjustScore bet
-              showState
+gameLoop = do bet <- inputBet
+              playersBox <- drawToBox ([], bet)
+              dealersBox <- drawToBox ([], 0)
+              playersBox <- drawToBox playersBox
+              let dealersCard = (head . fst) dealersBox
+              playersBox <- resolveBox getPlayersAction dealersCard playersBox
+              dealersBox <- resolveBox getDealersAction dealersCard dealersBox
+              adjustScore playersBox (fst dealersBox)
+              showState (fst dealersBox) (fst playersBox)
               shuffleIfNeeded
               gameLoop
 
 isBlackJack :: Hand -> Bool
 isBlackJack = (==22) . maximumPoints
 
-adjustScore :: Int -> GameS IO ()
-adjustScore bet = do state <- get
-                     let finalBet = if doubledDown state then bet * 2 else bet
-                     let currentScore = totalScore state
-                     let playersHand = handForType Player state
-                     let threeHalves x = ceiling $ 1.5 * fromIntegral x
-                     let adjustedScore = case handForType Dealer state `findOutcome` playersHand of
-                                           Win -> currentScore + if isBlackJack playersHand then threeHalves finalBet else finalBet
-                                           Loss -> currentScore - finalBet
-                                           Push -> currentScore
-                     put state { totalScore = adjustedScore }
+adjustScore :: Box -> Hand -> GameS IO ()
+adjustScore box dealersHand  = do state <- get
+                                  let bet = snd box
+                                  let currentScore = totalScore state
+                                  let playersHand = fst box
+                                  let threeHalves x = ceiling $ (1.5 :: Float) * fromIntegral x
+                                  let adjustedScore = case dealersHand `findOutcome` playersHand of
+                                                        Win -> currentScore + if isBlackJack playersHand then threeHalves bet else bet 
+                                                        Loss -> currentScore - bet
+                                                        Push -> currentScore
+                                  put state { totalScore = adjustedScore }
 
 inputBet :: GameS IO Int
 inputBet = liftIO $ putStrLn "How much do you bet?" >> readNumberUntilValid (>0) "Didn't catch that, please try again"
@@ -146,65 +136,54 @@ shuffleIfNeeded = do state <- get
                                                              liftIO $ putStrLn "Shuffled"
  
 showHandWithPoints :: Hand -> String
-showHandWithPoints h = show h ++ " (" ++ (show . maximumPoints) h ++ ")"
+showHandWithPoints h = showHand h ++ " (" ++ (show . maximumPoints) h ++ ")"
 
-showState :: GameS IO ()
-showState = do state <- get
-               liftIO $ do putStrLn ("Dealer's hand: " ++ showHandWithPoints (handForType Dealer state))
-                           putStrLn ("Your hand: " ++ showHandWithPoints (handForType Player state))
-                           putStrLn (case handForType Dealer state `findOutcome` handForType Player state of
-                                       Push -> "Push"
-                                       Win -> "You win!"
-                                       Loss -> "You loose")
-                           putStrLn ("Current score: " ++ show (totalScore state))
-                           putStr "Press <Enter> to continue" >> getLine 
-                           (putStrLn . concat . replicate 50) "-"
+showState :: Hand -> Hand -> GameS IO ()
+showState dealersHand playersHand = do state <- get
+                                       liftIO $ do putStrLn ("Dealer's hand: " ++ showHandWithPoints dealersHand)
+                                                   putStrLn ("Your hand: " ++ showHandWithPoints playersHand)
+                                                   putStrLn (case dealersHand `findOutcome` playersHand of
+                                                                Push -> "Push"
+                                                                Win -> "You win!"
+                                                                Loss -> "You loose")
+                                                   putStrLn ("Current score: " ++ show (totalScore state))
+                                                   putStr "Press <Enter> to continue" >> getLine 
+                                                   (putStrLn . concat . replicate 50) "-"
 
-handForType :: PlayerType -> Game -> Hand
-handForType pt = fromJust . lookup pt . hands
+resolveBox :: (Card -> Hand -> IO Action) -> Card -> Box -> GameS IO Box
+resolveBox getAction dealersCard b = if maximumPoints (fst b) `elem` [0, 21, 22] then return b
+                                     else do action <- lift $ getAction dealersCard (fst b)
+                                             state <- get
+                                             case action of
+                                               Stand -> return b
+                                               Double -> drawToHand (fst b) >>= \h -> return (h, snd b * 2)
+                                               Hit -> drawToBox b >>= resolveBox getAction dealersCard
 
-resolveForPlayerType :: PlayerType -> GameS IO ()
-resolveForPlayerType pt = do maximumPoints <- fmap (maximumPoints . handForType pt) get
-                             unless (maximumPoints `elem` [0, 21, 22]) $ do
-                                state <- get
-                                let dealersCard = (head . fromHand . handForType Dealer) state
-                                action <- lift $ getActionForPlayerType pt dealersCard (handForType pt state)
-                                case action of
-                                    Stand -> return ()
-                                    Double -> put state { doubledDown = True } >> drawToPlayerType pt >> return ()
-                                    Hit -> drawToPlayerType pt >> resolveForPlayerType pt
-
-getActionForPlayerType :: PlayerType -> Card -> Hand -> IO Action
-getActionForPlayerType Player = getPlayersAction
-getActionForPlayerType Dealer = getDealersAction
-                               
 getPlayersAction :: Card -> Hand -> IO Action
 getPlayersAction c h = do putStrLn $ "Dealer's first card is " ++ show c
-                          putStrLn $ "Your hand is: " ++ show h
-                          presentOptions $ map (\a -> (a, show a)) ([Hit, Stand] ++ [Double | (length . fromHand) h == 2])
+                          putStrLn $ "Your hand is: " ++ showHand h
+                          presentOptions $ map (\a -> (a, show a)) ([Hit, Stand] ++ [Double | length h == 2])
 
 getDealersAction :: Card -> Hand -> IO Action 
 getDealersAction c h = return $ if maximumPoints h < 17 then Hit else Stand
  
-addCardToHand :: Card -> Hand -> Hand
-addCardToHand c h = Hand $ c:fromHand h
-
 numberOfDecksInUse :: Int
 numberOfDecksInUse = 1
 
 newShuffledShoe :: IO [Card]
 newShuffledShoe = (shuffle . concat . replicate numberOfDecksInUse) deck
 
-drawToPlayerType :: PlayerType -> GameS IO Card
-drawToPlayerType pt = do state <- get
-                         let topCard = (head . cards) state
-                         put state { cards = tail (cards state),
-                                     hands = adjust (addCardToHand topCard) pt (hands state)}
-                         return topCard
-       
+drawToHand :: Hand -> GameS IO Hand
+drawToHand h = do state <- get
+                  let topCard = (head . cards) state
+                  put state { cards = tail (cards state) }
+                  return (topCard:h)
+
+drawToBox :: Box -> GameS IO Box
+drawToBox b = drawToHand (fst b) >>= \h -> return (h, snd b)
+
 main = do shuffledShoe <- newShuffledShoe
           evalStateT gameLoop Game { cards = shuffledShoe,
-                                     hands = Map.fromList [(Dealer, Hand []), (Player, Hand [])],
                                      totalScore = 0,
                                      doubledDown = False }
           
