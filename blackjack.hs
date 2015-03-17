@@ -160,7 +160,7 @@ adjustScoreForBox dealersHand (playersHand, bet) = do state <- get
                                                                             Push -> currentScore
                                                       put state { totalScore = adjustedScore }
 
-resolveBox :: (Card -> Hand -> IO Action) -> Card -> Box -> GameS IO [Box]
+resolveBox :: (Card -> Hand -> [Action] -> IO Action) -> Card -> Box -> GameS IO [Box]
 resolveBox f c (h, bet) = do (playersHand, playerDoubled, splittedHand) <- resolveHand f c (h, False, Nothing)
                              let resultingBox = (playersHand, if playerDoubled then bet * 2 else bet)
                              rest <- resolveMaybeBox f c (splittedHand, bet)
@@ -168,9 +168,11 @@ resolveBox f c (h, bet) = do (playersHand, playerDoubled, splittedHand) <- resol
   where resolveMaybeBox f c (Nothing, _) = return []
         resolveMaybeBox f c (Just h, bet) = resolveBox f c (h, bet)
 
-resolveHand :: (Card -> Hand -> IO Action) -> Card -> HandResolution -> GameS IO HandResolution
+resolveHand :: (Card -> Hand -> [Action] -> IO Action) -> Card -> HandResolution -> GameS IO HandResolution
 resolveHand getAction dealersCard hr@(h, d, sh) = if maximumPoints h `elem` [0, 21, 22] then return hr 
-                                                  else do action <- lift $ getAction dealersCard h
+                                                  else do let allowedActions = [Hit, Stand] ++ [Double | length h == 2] ++ [Split | equalValue h]
+                                                          action <- lift $ getAction dealersCard h allowedActions
+                                                          unless (action `elem` allowedActions) $ error "Action is not allowed"
                                                           state <- get
                                                           case action of
                                                             Stand -> return hr
@@ -181,13 +183,13 @@ resolveHand getAction dealersCard hr@(h, d, sh) = if maximumPoints h `elem` [0, 
                                                                         resolveHand getAction dealersCard (h', d, Just newHand)
                                                             Hit -> drawToHandResoltion hr >>= resolveHand getAction dealersCard
 
-getPlayersAction :: Card -> Hand -> IO Action
-getPlayersAction c h = do putStrLn $ "Dealer's first card is " ++ show c
-                          putStrLn $ "Your hand is: " ++ showHand h
-                          presentOptions $ map (\a -> (a, show a)) ([Hit, Stand] ++ [Double | length h == 2] ++ [Split | equalValue h])
+getPlayersAction :: Card -> Hand -> [Action] -> IO Action
+getPlayersAction c h allowedActions = do putStrLn $ "Dealer's first card is " ++ show c
+                                         putStrLn $ "Your hand is: " ++ showHand h
+                                         presentOptions $ map (\a -> (a, show a)) allowedActions
 
-getDealersAction :: Card -> Hand -> IO Action 
-getDealersAction c h = return $ if maximumPoints h < 17 then Hit else Stand
+getDealersAction :: Card -> Hand -> [Action] -> IO Action
+getDealersAction _ h _ = return $ if maximumPoints h < 17 then Hit else Stand
  
 numberOfDecksInUse :: Int
 numberOfDecksInUse = 1
