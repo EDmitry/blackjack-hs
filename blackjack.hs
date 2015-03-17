@@ -34,11 +34,19 @@ data Game = Game { cards :: [Card],
 
 type GameS a = StateT Game a
 
+data HandState = HandState { canSplit :: Bool, canHit :: Bool }
+
+type HandS a = StateT HandState a
+
 card :: Int -> Card
 card 10 = Card (Queen, Spades)
 card 11 = Card (Ace, Spades)
 card x = Card (Rank x, Spades)
 
+isAce :: Card -> Bool
+isAce (Card (Ace, _)) = True
+isAce _ = False
+ 
 shuffle :: [a] -> IO [a]
 shuffle [] = return []
 shuffle xs = do randomPosition <- getStdRandom (randomR (0, length xs - 1))
@@ -161,27 +169,38 @@ adjustScoreForBox dealersHand (playersHand, bet) = do state <- get
                                                       put state { totalScore = adjustedScore }
 
 resolveBox :: (Card -> Hand -> [Action] -> IO Action) -> Card -> Box -> GameS IO [Box]
-resolveBox f c (h, bet) = do (playersHand, playerDoubled, splittedHand) <- resolveHand f c (h, False, Nothing)
-                             let resultingBox = (playersHand, if playerDoubled then bet * 2 else bet)
-                             rest <- resolveMaybeBox f c (splittedHand, bet)
-                             return (resultingBox:rest)
-  where resolveMaybeBox f c (Nothing, _) = return []
-        resolveMaybeBox f c (Just h, bet) = resolveBox f c (h, bet)
+resolveBox f c b = evalStateT (resolveBox' f c b) HandState { canSplit = True, canHit = True }
 
-resolveHand :: (Card -> Hand -> [Action] -> IO Action) -> Card -> HandResolution -> GameS IO HandResolution
-resolveHand getAction dealersCard hr@(h, d, sh) = if maximumPoints h `elem` [0, 21, 22] then return hr 
-                                                  else do let allowedActions = [Hit, Stand] ++ [Double | length h == 2] ++ [Split | equalValue h]
-                                                          action <- lift $ getAction dealersCard h allowedActions
-                                                          unless (action `elem` allowedActions) $ error "Action is not allowed"
-                                                          state <- get
-                                                          case action of
-                                                            Stand -> return hr
-                                                            Double -> drawToHand h >>= \h' -> return (h', True, sh)
-                                                            Split -> do h' <- drawToHand (tail h)
-                                                                        newHand <- drawToHand [head h]
-                                                                        return (h', d, Just newHand) 
-                                                                        resolveHand getAction dealersCard (h', d, Just newHand)
-                                                            Hit -> drawToHandResoltion hr >>= resolveHand getAction dealersCard
+resolveBox' :: (Card -> Hand -> [Action] -> IO Action) -> Card -> Box -> HandS (GameS IO) [Box]
+resolveBox' f c (h, bet) = do (playersHand, playerDoubled, splittedHand) <- resolveHand f c (h, False, Nothing)
+                              let resultingBox = (playersHand, if playerDoubled then bet * 2 else bet)
+                              rest <- resolveMaybeBox f c (splittedHand, bet)
+                              return (resultingBox:rest)
+  where resolveMaybeBox f c (Nothing, _) = return []
+        resolveMaybeBox f c (Just h, bet) = resolveBox' f c (h, bet)
+
+
+restrictSplitting :: HandS (GameS IO) ()
+restrictSplitting = get >>= \s -> put s { canSplit = False }
+
+restrictHitting :: HandS (GameS IO) ()
+restrictHitting = get >>= \s -> put s { canHit = False }
+
+resolveHand :: (Card -> Hand -> [Action] -> IO Action) -> Card -> HandResolution -> HandS (GameS IO) HandResolution
+resolveHand getAction dealersCard hr@(h, d, sh) = do handState <- get
+                                                     if maximumPoints h `elem` [0, 21, 22] || not (canHit handState) then return hr 
+                                                     else do let allowedActions = [Hit, Stand] ++ [Double | length h == 2] ++ [Split | equalValue h && canSplit handState]
+                                                             action <- liftIO $ getAction dealersCard h allowedActions
+                                                             unless (action `elem` allowedActions) $ error "Action is not allowed"
+                                                             case action of
+                                                               Stand -> return hr
+                                                               Double -> lift (drawToHand h) >>= \h' -> return (h', True, sh)
+                                                               Split -> do restrictSplitting
+                                                                           when (isAce $ head h) restrictHitting
+                                                                           h' <- lift $ drawToHand (tail h)
+                                                                           newHand <- lift $ drawToHand [head h]
+                                                                           resolveHand getAction dealersCard (h', d, Just newHand)
+                                                               Hit -> lift (drawToHandResolution hr) >>= resolveHand getAction dealersCard
 
 getPlayersAction :: Card -> Hand -> [Action] -> IO Action
 getPlayersAction c h allowedActions = do putStrLn $ "Dealer's first card is " ++ show c
@@ -203,8 +222,8 @@ drawToHand h = do state <- get
                   put state { cards = tail (cards state) }
                   return (topCard:h)
 
-drawToHandResoltion :: HandResolution -> GameS IO HandResolution
-drawToHandResoltion (h, d, sc) = drawToHand h >>= \h' -> return (h', d, sc)
+drawToHandResolution :: HandResolution -> GameS IO HandResolution
+drawToHandResolution (h, d, sc) = drawToHand h >>= \h' -> return (h', d, sc)
 
 drawToBox :: Box -> GameS IO Box
 drawToBox (h, bet) = drawToHand h >>= \h' -> return (h', bet)
