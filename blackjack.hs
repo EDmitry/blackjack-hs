@@ -128,20 +128,22 @@ showHandWithPoints :: Hand -> String
 showHandWithPoints h = showHand h ++ " (" ++ (show . maximumPoints) h ++ ")"
 
 showState :: [Box] -> Hand -> GameS IO ()
-showState playersBoxes dealersHand = do state <- get
-                                        liftIO $ putStrLn ("Dealer's hand: " ++ showHandWithPoints dealersHand)
-                                        mapM_ (showStateForBox dealersHand . fst) playersBoxes
-                                        liftIO $ do putStrLn ("Current score: " ++ show (totalScore state))
-                                                    putStr "Press <Enter> to continue" >> getLine 
-                                                    (putStrLn . concat . replicate 50) "-"
+showState playersBoxes dealersHand = do
+  state <- get
+  liftIO $ putStrLn ("Dealer's hand: " ++ showHandWithPoints dealersHand)
+  mapM_ (showStateForBox dealersHand . fst) playersBoxes
+  liftIO $ do putStrLn ("Current score: " ++ show (totalScore state))
+              putStr "Press <Enter> to continue" >> getLine
+              (putStrLn . concat . replicate 50) "-"
 
 showStateForBox :: Hand -> Hand -> GameS IO ()
-showStateForBox dealersHand playersHand = do state <- get
-                                             liftIO $ do let result = case dealersHand `findOutcome` playersHand of
-                                                                        Push -> "Push"
-                                                                        Win -> "Win!"
-                                                                        Loss -> "Loss"
-                                                         putStrLn ("Your hand: " ++ showHandWithPoints playersHand ++ ": " ++ result)
+showStateForBox dealersHand playersHand = do
+  state <- get
+  liftIO $ do let result = case dealersHand `findOutcome` playersHand of
+                             Push -> "Push"
+                             Win -> "Win!"
+                             Loss -> "Loss"
+              putStrLn ("Your hand: " ++ showHandWithPoints playersHand ++ ": " ++ result)
 
 gameLoop :: GameS IO ()
 gameLoop = do bet <- inputBet
@@ -159,14 +161,15 @@ adjustScore :: [Box] -> Hand -> GameS IO ()
 adjustScore playersBoxes dealersHand  = mapM_ (adjustScoreForBox dealersHand) playersBoxes
 
 adjustScoreForBox :: Hand -> Box -> GameS IO ()
-adjustScoreForBox dealersHand (playersHand, bet) = do state <- get
-                                                      let currentScore = totalScore state
-                                                      let threeHalves x = ceiling $ (1.5 :: Float) * fromIntegral x
-                                                      let adjustedScore = case dealersHand `findOutcome` playersHand of
-                                                                            Win -> currentScore + if isBlackJack playersHand then threeHalves bet else bet 
-                                                                            Loss -> currentScore - bet
-                                                                            Push -> currentScore
-                                                      put state { totalScore = adjustedScore }
+adjustScoreForBox dealersHand (playersHand, bet) = do
+  state <- get
+  let currentScore = totalScore state
+  let threeHalves x = ceiling $ (1.5 :: Float) * fromIntegral x
+  let adjustedScore = case dealersHand `findOutcome` playersHand of
+                        Win -> currentScore + if isBlackJack playersHand then threeHalves bet else bet 
+                        Loss -> currentScore - bet
+                        Push -> currentScore
+  put state { totalScore = adjustedScore }
 
 resolveBox :: (Card -> Hand -> [Action] -> IO Action) -> Card -> Box -> GameS IO [Box]
 resolveBox f c b = evalStateT (resolveBox' f c b) HandState { canSplit = True, canHit = True }
@@ -187,20 +190,21 @@ restrictHitting :: HandS (GameS IO) ()
 restrictHitting = get >>= \s -> put s { canHit = False }
 
 resolveHand :: (Card -> Hand -> [Action] -> IO Action) -> Card -> HandResolution -> HandS (GameS IO) HandResolution
-resolveHand getAction dealersCard hr@(h, d, sh) = do handState <- get
-                                                     if maximumPoints h `elem` [0, 21, 22] || not (canHit handState) then return hr 
-                                                     else do let allowedActions = [Hit, Stand] ++ [Double | length h == 2] ++ [Split | equalValue h && canSplit handState]
-                                                             action <- liftIO $ getAction dealersCard h allowedActions
-                                                             unless (action `elem` allowedActions) $ error "Action is not allowed"
-                                                             case action of
-                                                               Stand -> return hr
-                                                               Double -> lift (drawToHand h) >>= \h' -> return (h', True, sh)
-                                                               Split -> do restrictSplitting
-                                                                           when (isAce $ head h) restrictHitting
-                                                                           h' <- lift $ drawToHand (tail h)
-                                                                           newHand <- lift $ drawToHand [head h]
-                                                                           resolveHand getAction dealersCard (h', d, Just newHand)
-                                                               Hit -> lift (drawToHandResolution hr) >>= resolveHand getAction dealersCard
+resolveHand getAction dealersCard hr@(h, d, sh) = do
+  handState <- get
+  if maximumPoints h `elem` [0, 21, 22] || not (canHit handState) then return hr 
+  else do let allowedActions = [Hit, Stand] ++ [Double | length h == 2] ++ [Split | equalValue h && canSplit handState]
+          action <- liftIO $ getAction dealersCard h allowedActions
+          unless (action `elem` allowedActions) $ error "Action is not allowed"
+          case action of
+            Stand -> return hr
+            Double -> lift (drawToHand h) >>= \h' -> return (h', True, sh)
+            Split -> do restrictSplitting
+                        when (isAce $ head h) restrictHitting
+                        h' <- lift $ drawToHand (tail h)
+                        newHand <- lift $ drawToHand [head h]
+                        resolveHand getAction dealersCard (h', d, Just newHand)
+            Hit -> lift (drawToHandResolution hr) >>= resolveHand getAction dealersCard
 
 getPlayersAction :: Card -> Hand -> [Action] -> IO Action
 getPlayersAction c h allowedActions = do putStrLn $ "Dealer's first card is " ++ show c
